@@ -5,7 +5,10 @@ defmodule KafkaGenStage.Utils do
 
   require Logger
 
+  @typedoc "Kafka topic identifier."
   @type topic :: KafkaGenStage.topic()
+
+  @typedoc "Brod's type for where to start reading in kafka topic."
   @type begin_offset :: KafkaGenStage.begin_offset()
 
   @doc """

@@ -1,34 +1,48 @@
 defmodule KafkaGenStage.Consumer do
   @moduledoc """
-  Producer Gen_Stage for reading from Kafka topic, using [Klarna's Brod](https://github.com/klarna/brod).
+  Producer GenStage for reading from Kafka topic, using [Klarna's Brod](https://github.com/klarna/brod).
+
+  > Note that is its **consumer** from Kafka's perspective, but **producer** from GenStage's.
+
+  ## Messages
+
+  Events emited are in 4-tuple format
+
+      @type msg_tuple :: {offset :: non_neg_integer(), timestamp :: non_neg_integer(),
+      key :: binary(), value :: binary()}
+
+  ## Options
+  When starting, several options can modify behaviour of GenStage.
+
+  * `:begin_offset` - where to start reading the topic, defaut to `:earliest`,
+    or provide exact offset number (inclusive)
+
+  * `:read_end_offset` - when to stop reading, also stops gen_stage and sent cancel to subscribers
+    possible values:
+
+    * exact integer of last offset to be read(inclusive)
+    * `:latest` - will check what is offset of last message at time when GenStage is initializing
+    * `:infinity` - does not stop reading by offset, **default**
+
+  * `:stats_handler` - every second called function with some statistics, type is:
+    `(%{count: non_neg_integer(), cursor: non_neg_integer()}, topic() -> :ok)`, you can use this
+    function for monitoring of throughput etc...
+
+  * `:gen_stage_producer_options` - refer to options passed to underlaying GenStage, usefull for
+    accumulating demand when partition dispatcher is used (`[demand: :accumulate]`).
+
+  * `:partition` - one gen_stage reads from single partition, 0 by default
 
   ## Starting and stopping brod client
 
-  Brod client shoudl be either already started (provided as atom or pid),
-  or provided as initializing function.
+  Brod client should be either already started (provided as atom or pid) or provided as
+  initializing function.
 
-  Closing of brod client is out of scope of this gen_stage.
-  If you want client to be started exclusively for this gen_stage, do it via initialize function,
-  and manage lifecycle on your own, simple example being:
+  Closing of brod client is out of scope of this gen_stage. If you want client to be started
+  exclusively for this gen_stage, do it via initialize function, and manage lifecycle on your own,
+  simple example being:
 
-  `fn -> :brod.start_link_client([{'localhost', 9092}] = _endpoints) end`.
-
-  ## Options
-  When starting, sevaral options can modify behaviour of GenStage
-
-  - **begin_offset**: where to start reading the topic, defaut to `:earliest`,
-    or provide exact offset number (inclusive)
-  - **read_end_offset**: when to stop reading, also stops gen_stage and sent cancel to subscribers
-    possible values:
-    - exact integer of last offset to be read(inclusive)
-    - `:latest` : will check what is offset of last message at time when gen_stage is initializing
-    - `:infinity` : does not stop reading by offset, **default**
-  - **stats_handler**: every second called function with some statistics, type is:
-    (%{count: non_neg_integer(), cursor: non_neg_integer()}, topic() -> :ok)
-    you can use this function for monitoring of throughput etc...
-  - **gen_stage_producer_options**: refer to options passed to genstage, usefull for accumulating
-  demand when partition dispatcher is used `[demand: :accumulate]`
-  - **partition**: one gen_stage reads from single partition, 0 by default
+      fn -> :brod.start_link_client([{'localhost', 9092}] = _endpoints) end
 
   """
 
@@ -47,17 +61,32 @@ defmodule KafkaGenStage.Consumer do
   defrecord :kafka_message, extract(:kafka_message, from_lib: "brod/include/brod.hrl")
   defrecord :kafka_message_set, extract(:kafka_message_set, from_lib: "brod/include/brod.hrl")
 
+  @typedoc "Last offset (inclusive) to be emmited by GenStage."
   @type end_offset :: Logic.end_offset()
+
+  @typedoc "Starting option(see @moduledoc) which defines when to stop reading."
   @type read_end_offset :: :latest | end_offset()
+
+  @typedoc "Format of read messages."
   @type msg_tuple :: Logic.msg_tuple()
+
+  @typedoc "Runtime stats of consumer. Count of messeges received in last second."
   @type stats :: %{count: non_neg_integer(), cursor: non_neg_integer()}
+
+  @typedoc "Kafka topic identifier."
   @type topic :: KafkaGenStage.topic()
+
+  @typedoc "Function consuming runtime stats -> to sent to StatsD or so."
   @type stats_handler :: (stats(), topic() -> :ok)
+
+  @typedoc "Brod's type for where to start reading in kafka topic."
   @type begin_offset :: KafkaGenStage.begin_offset()
+
+  @typedoc "Brod client passing or initialization."
   @type brod_client_init :: atom() | pid() | (() -> {:ok, atom() | pid()})
 
   @typedoc """
-  See @moduledoc.
+  All the startup option to configure genstage. See @moduledoc.
   """
   @type option ::
           {:begin_offset, begin_offset()}
@@ -66,6 +95,7 @@ defmodule KafkaGenStage.Consumer do
           | {:partition, integer()}
           | {:stats_handler, (integer(), topic() -> :ok)}
 
+  @typedoc "List of startup options."
   @type options :: [option()]
 
   defmodule State do
@@ -86,6 +116,7 @@ defmodule KafkaGenStage.Consumer do
     ]
   end
 
+  @typedoc "Just documentation purposes of internal state typespec."
   @type state :: %State{
           topic: topic(),
           partition: non_neg_integer(),
@@ -118,21 +149,7 @@ defmodule KafkaGenStage.Consumer do
     GenStage.call(reader, :get_insight)
   end
 
-  defp resolve_end_offset(read_end_offset, client, topic, partition) do
-    case read_end_offset do
-      offset when is_integer(offset) ->
-        offset
-
-      :infinity ->
-        :infinity
-
-      :latest ->
-        {:ok, offset} = Utils.resolve_offset(client, topic, partition, :latest)
-        # it next offset to be assigned, we have to use the one before
-        offset - 1
-    end
-  end
-
+  @impl true
   def init({brod_client_init, topic, options}) do
     # default options
     partition = options[:partition] || @partition
@@ -167,6 +184,7 @@ defmodule KafkaGenStage.Consumer do
     end
   end
 
+  @impl true
   def handle_demand(
         new_demand,
         %State{queue: queue, demand: pending_demand, consumer: consumer_pid} = state
@@ -182,10 +200,12 @@ defmodule KafkaGenStage.Consumer do
      %State{state | queue: queue, demand: demand, stats: update_stats(state.stats, to_send)}}
   end
 
+  @impl true
   def handle_call(:get_insight, _from, %State{stats: stats, topic: topic} = state) do
     {:reply, {:ok, %{offset_cursor: stats.cursor, topic: topic}}, [], state}
   end
 
+  @impl true
   def handle_info(:subscribe_consumer, %State{} = state) do
     case :brod.subscribe(state.brod_client, self(), state.topic, state.partition, []) do
       {:ok, consumer_pid} ->
@@ -252,8 +272,24 @@ defmodule KafkaGenStage.Consumer do
     end
   end
 
+  @impl true
   def terminate(_reason, %State{consumer: pid}) do
     :brod_consumer.stop(pid)
+  end
+
+  defp resolve_end_offset(read_end_offset, client, topic, partition) do
+    case read_end_offset do
+      offset when is_integer(offset) ->
+        offset
+
+      :infinity ->
+        :infinity
+
+      :latest ->
+        {:ok, offset} = Utils.resolve_offset(client, topic, partition, :latest)
+        # it next offset to be assigned, we have to use the one before
+        offset - 1
+    end
   end
 
   defp update_stats(%{count: count, cursor: cursor} = stats, to_send) do

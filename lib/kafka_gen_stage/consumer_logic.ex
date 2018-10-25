@@ -3,12 +3,18 @@ defmodule KafkaGenStage.ConsumerLogic do
   Separates pure logic of consumer genstage to be unit tested.
   """
 
+  @typedoc "Format of read messages."
   @type msg_tuple ::
           {offset :: non_neg_integer(), timestamp :: non_neg_integer(), key :: binary(),
            value :: binary()}
+
+  @typedoc "Acking to prod consumer."
   @type ack :: non_neg_integer() | :no_ack
+
+  @typedoc "Last offset (inclusive) to be emmited by GenStage."
   @type end_offset :: non_neg_integer() | :infinity
 
+  @typedoc "Internal type for working with demand and event buffers."
   @type dispatch ::
           {msgs_to_send :: [msg_tuple()], ack_to_brod_consumer :: ack(),
            buffered_demand :: non_neg_integer(), buffered_msgs :: :queue.queue()}

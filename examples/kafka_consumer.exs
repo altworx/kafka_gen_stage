@@ -22,8 +22,7 @@ end
   KafkaGenStage.Consumer.start_link(
     fn -> :brod.start_link_client([{'localhost', 9092}]) end,
     "cargo_logins",
-    [read_until: :latest],
-    []
+    read_until: :latest
   )
 
 {:ok, c} = GenStage.start_link(ConsoleConsumer, :ok)
