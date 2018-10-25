@@ -1,12 +1,9 @@
 # KafkaGenStage
-Fast GenStage wrapper around brod producer and consumer.
+Fast GenStages for reading and writting into Apache Kafka.
+GenStages are built using [Klarna's Brod](https://github.com/klarna/brod).
 
 Consumer is buffering events as well as demand.
-Producer is controlling demand manually and manages asks on acks.
-
-## Consumer
-Brod client lifecycle is not managed internally by gen_stage. Either provide started brod client or
-use function as *brod_client_init* argument.
+Producer is controlling demand manually, synchronizing GenStage's *ask* with brod's *ack*.
 
 
 ```elixir

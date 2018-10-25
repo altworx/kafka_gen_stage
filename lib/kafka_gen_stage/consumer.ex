@@ -1,17 +1,35 @@
 defmodule KafkaGenStage.Consumer do
   @moduledoc """
-  Producer Gen_Stage reading from Kafka topic.
+  Producer Gen_Stage for reading from Kafka topic, using [Klarna's Brod](https://github.com/klarna/brod).
 
   ## Starting and stopping brod client
 
   Brod client shoudl be either already started (provided as atom or pid),
   or provided as initializing function.
 
-  Closing of brod client is out of scope of this gen_stage. If client is started
-  exclusively for this gen_stage. Starting via initialize function allows to monitor this gen_stage
-  by 3rd process which can manage closing of :brod_client.
+  Closing of brod client is out of scope of this gen_stage.
+  If you want client to be started exclusively for this gen_stage, do it via initialize function,
+  and manage lifecycle on your own, simple example being:
 
-  Or just use fn -> :brod.start_link_client(client, endpoints) end.
+  `fn -> :brod.start_link_client([{'localhost', 9092}] = _endpoints) end`.
+
+  ## Options
+  When starting, sevaral options can modify behaviour of GenStage
+
+  - **begin_offset**: where to start reading the topic, defaut to `:earliest`,
+    or provide exact offset number (inclusive)
+  - **read_end_offset**: when to stop reading, also stops gen_stage and sent cancel to subscribers
+    possible values:
+    - exact integer of last offset to be read(inclusive)
+    - `:latest` : will check what is offset of last message at time when gen_stage is initializing
+    - `:infinity` : does not stop reading by offset, **default**
+  - **stats_handler**: every second called function with some statistics, type is:
+    (%{count: non_neg_integer(), cursor: non_neg_integer()}, topic() -> :ok)
+    you can use this function for monitoring of throughput etc...
+  - **gen_stage_producer_options**: refer to options passed to genstage, usefull for accumulating
+  demand when partition dispatcher is used `[demand: :accumulate]`
+  - **partition**: one gen_stage reads from single partition, 0 by default
+
   """
 
   use GenStage
@@ -29,27 +47,17 @@ defmodule KafkaGenStage.Consumer do
   defrecord :kafka_message, extract(:kafka_message, from_lib: "brod/include/brod.hrl")
   defrecord :kafka_message_set, extract(:kafka_message_set, from_lib: "brod/include/brod.hrl")
 
-  @type end_offset :: pos_integer() | :infinity
+  @type end_offset :: Logic.end_offset()
   @type read_end_offset :: :latest | end_offset()
-  @typep reading_flag :: :cont | :halt
   @type msg_tuple :: Logic.msg_tuple()
-
+  @type stats :: %{count: non_neg_integer(), cursor: non_neg_integer()}
   @type topic :: KafkaGenStage.topic()
+  @type stats_handler :: (stats(), topic() -> :ok)
   @type begin_offset :: KafkaGenStage.begin_offset()
   @type brod_client_init :: atom() | pid() | (() -> {:ok, atom() | pid()})
 
   @typedoc """
-  Possible configuration options:
-   - **begin_offset**: where to start reading the topic, defaut to `:earliest`
-   - **read_end_offset**: when to stop reading, also stop gen_stage and sent cancel to subscribers
-     possible values:
-     - last offset to be read
-     - `:latest` : will check what is offset of last message at time hen gen_stafe is initializing
-     - `:infinity` : does not stop reading by offset, **default**
-   - **stats_handler**: every second called function with number of read message and so
-   - **gen_stage_producer_options**: refer to options passed to genstage, usefull for accumulating
-     demand when partition dispatcher is used `[demand: :accumulate]`
-   - **partition**: one gen_stage reads from single partition, 0 by default
+  See @moduledoc.
   """
   @type option ::
           {:begin_offset, begin_offset()}
@@ -70,7 +78,6 @@ defmodule KafkaGenStage.Consumer do
       :consumer,
       :consumer_ref,
       :queue,
-      :offset_cursor,
       :reading,
       :demand,
       :stats,
@@ -78,6 +85,21 @@ defmodule KafkaGenStage.Consumer do
       :stats_handler
     ]
   end
+
+  @type state :: %State{
+          topic: topic(),
+          partition: non_neg_integer(),
+          brod_client: atom() | pid(),
+          brod_client_mref: reference(),
+          consumer: pid(),
+          consumer_ref: reference(),
+          queue: :queue.queue(),
+          reading: :halt | :cont,
+          demand: non_neg_integer(),
+          stats: stats(),
+          end_offset: end_offset(),
+          stats_handler: stats_handler()
+        }
 
   @doc """
   Start linked Consumer GenStage of topic (with underlying brod consumer).
@@ -133,8 +155,7 @@ defmodule KafkaGenStage.Consumer do
         brod_client_mref: Process.monitor(client),
         queue: :queue.new(),
         demand: 0,
-        stats: 0,
-        offset_cursor: 0,
+        stats: %{count: 0, cursor: 0},
         reading: :cont,
         stats_handler: stats_handler,
         end_offset: resolve_end_offset(read_end_offset, client, topic, partition)
@@ -158,17 +179,11 @@ defmodule KafkaGenStage.Consumer do
     end
 
     {:noreply, to_send,
-     %State{
-       state
-       | queue: queue,
-         demand: demand,
-         stats: state.stats + length(to_send),
-         offset_cursor: update_cursor(to_send, state.offset_cursor)
-     }}
+     %State{state | queue: queue, demand: demand, stats: update_stats(state.stats, to_send)}}
   end
 
-  def handle_call(:get_insight, _from, %State{} = state) do
-    {:reply, {:ok, %{offset_cursor: state.offset_cursor, topic: state.topic}}, [], state}
+  def handle_call(:get_insight, _from, %State{stats: stats, topic: topic} = state) do
+    {:reply, {:ok, %{offset_cursor: stats.cursor, topic: topic}}, [], state}
   end
 
   def handle_info(:subscribe_consumer, %State{} = state) do
@@ -192,7 +207,8 @@ defmodule KafkaGenStage.Consumer do
           end_offset: end_offset
         } = state
       ) do
-    {reading_flag, queue} = messages_into_queue(messages, queue, end_offset)
+    {reading_flag, queue} =
+      Logic.messages_into_queue(messages, queue, end_offset, &kafka_msg_record_to_tuple/1)
 
     if reading_flag == :halt do
       GenStage.async_info(self(), :reading_end)
@@ -200,16 +216,9 @@ defmodule KafkaGenStage.Consumer do
 
     {to_send, to_ack, demand, queue} = Logic.prepare_dispatch(queue, demand)
     :ok = ack(consumer_pid, to_ack)
-    new_count = state.stats + length(to_send)
 
     {:noreply, to_send,
-     %State{
-       state
-       | demand: demand,
-         queue: queue,
-         stats: new_count,
-         offset_cursor: update_cursor(to_send, state.offset_cursor)
-     }}
+     %State{state | demand: demand, queue: queue, stats: update_stats(state.stats, to_send)}}
   end
 
   def handle_info({:DOWN, ref, :process, _object, reason}, %State{brod_client_mref: ref} = state) do
@@ -228,11 +237,11 @@ defmodule KafkaGenStage.Consumer do
 
   def handle_info(
         :time_to_report_stats,
-        %State{stats: count, topic: topic, stats_handler: stats_handler} = state
+        %State{stats: stats, topic: topic, stats_handler: stats_handler} = state
       ) do
-    stats_handler.(count, topic)
+    stats_handler.(stats, topic)
     Process.send_after(self(), :time_to_report_stats, 1000)
-    {:noreply, [], %State{state | stats: 0}}
+    {:noreply, [], %State{state | stats: %{stats | count: 0}}}
   end
 
   def handle_info(:reading_end, %State{} = state) do
@@ -247,6 +256,10 @@ defmodule KafkaGenStage.Consumer do
     :brod_consumer.stop(pid)
   end
 
+  defp update_stats(%{count: count, cursor: cursor} = stats, to_send) do
+    %{stats | count: count + length(to_send), cursor: update_cursor(to_send, cursor)}
+  end
+
   defp update_cursor(to_send, current) do
     case to_send do
       [] = _nothing_to_send ->
@@ -258,13 +271,9 @@ defmodule KafkaGenStage.Consumer do
     end
   end
 
-  @spec messages_into_queue([any()], :queue.queue(msg_tuple()), end_offset()) ::
-          {reading_flag(), :queue.queue(msg_tuple())}
-  defp messages_into_queue(messages, queue, end_offset) do
-    Enum.reduce(messages, {:cont, queue}, fn msg, {flag, queue} ->
-      kafka_message(value: value, offset: offset, key: key, ts: ts) = msg
-      Logic.message_into_queue_reducer({offset, ts, key, value}, flag, end_offset, queue)
-    end)
+  defp kafka_msg_record_to_tuple(kafka_msg) do
+    kafka_message(value: value, offset: offset, key: key, ts: ts) = kafka_msg
+    {offset, ts, key, value}
   end
 
   defp ack(_pid, :no_ack), do: :ok

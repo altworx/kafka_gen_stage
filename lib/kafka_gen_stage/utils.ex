@@ -31,9 +31,9 @@ defmodule KafkaGenStage.Utils do
   @doc """
   Default stats handler for periodic info-report about genstage status.
   """
-  def log_stats(count, _topic) do
+  def log_stats(%{count: count, cursor: cursor}, topic) do
     if count > 0 do
-      Logger.info("#{inspect count}")
+      Logger.info("topic = #{topic}, throughput = #{count}, offset_cursor = #{cursor}")
     end
   end
 

@@ -10,9 +10,6 @@ defmodule ConsoleConsumer do
   end
 
   def handle_events(events, _from, state) do
-    # Wait for a second.
-    :timer.sleep(1000)
-
     # Inspect the events.
     IO.inspect(events)
 
@@ -24,7 +21,7 @@ end
 {:ok, regen} =
   KafkaGenStage.Consumer.start_link(
     fn -> :brod.start_link_client([{'localhost', 9092}]) end,
-    "cargo_esb_xml",
+    "cargo_logins",
     [read_until: :latest],
     []
   )

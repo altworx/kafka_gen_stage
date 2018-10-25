@@ -33,5 +33,21 @@ defmodule KafkaGenStage.ConsumerLogicTest do
     assert Logic.prepare_dispatch(:queue.new(), 5) == {[], :no_ack, 5, :queue.new()}
   end
 
+  test "messages_into_queue inserts all on infinity end offset" do
+    buffer = :queue.from_list([@msg0])
+    {:cont, new_buffer} = Logic.messages_into_queue([@msg1, @msg2], buffer, :infinity)
+    assert :queue.to_list(new_buffer) == @msgs
+  end
+
+  test "messages_into_queue insert until end offset inclusive" do
+    {:halt, buffer} = Logic.messages_into_queue(@msgs, :queue.new(), 1)
+    assert :queue.to_list(buffer) == [@msg0, @msg1]
+  end
+
+  test "message_into_queue dont insert after end offset" do
+    buffer = :queue.from_list([@msg0, @msg1])
+    {:halt, new_buffer} = Logic.messages_into_queue([@msg2], buffer, 1)
+    assert :queue.to_list(new_buffer) == [@msg0, @msg1]
+  end
 
 end
