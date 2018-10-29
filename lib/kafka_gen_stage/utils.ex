@@ -29,7 +29,13 @@ defmodule KafkaGenStage.Utils do
   """
   @spec resolve_client(atom() | pid() | (() -> {:ok, atom() | pid()})) :: {:ok, atom() | pid()}
   def resolve_client(client) when is_atom(client) or is_pid(client), do: {:ok, client}
-  def resolve_client(client_lazy) when is_function(client_lazy), do: client_lazy.()
+  def resolve_client(brod_init) when is_function(brod_init) do
+    case brod_init.() do
+      {:ok, client} = resolved when is_atom(client) or is_pid(client) -> resolved
+      {:error, _reason} = error -> error
+      bad_result -> {:error, {:brod_init_function_bad_result, bad_result}}
+    end
+  end
 
   @doc """
   Default stats handler for periodic info-report about genstage status.
