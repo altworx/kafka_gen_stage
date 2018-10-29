@@ -5,7 +5,7 @@ Kafka client.
 
 Consumer is buffering events as well as demand.
 
-Producer is controlling demand manually, synchronizing GenStage's *ask* with brod's *ack*.
+Producer (**coming soon**) is controlling demand manually, synchronizing GenStage's *ask* with brod's *ack*.
 
 ## Example
 
