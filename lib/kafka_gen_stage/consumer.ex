@@ -28,6 +28,9 @@ defmodule KafkaGenStage.Consumer do
     `(%{count: non_neg_integer(), cursor: non_neg_integer()}, topic() -> :ok)`, you can use this
     function for monitoring of throughput etc...
 
+  * `:stats_handler_interval` - if you dont want stats_hander to be called every second,
+    provide desired interval (milliseconds)
+
   * `:gen_stage_producer_options` - refer to options passed to underlaying GenStage, usefull for
     accumulating demand when partition dispatcher is used (`[demand: :accumulate]`).
 
@@ -49,6 +52,7 @@ defmodule KafkaGenStage.Consumer do
   use GenStage
 
   @partition 0
+  @default_interval 1000
 
   alias KafkaGenStage.ConsumerLogic, as: Logic
   alias KafkaGenStage.Utils
@@ -93,7 +97,8 @@ defmodule KafkaGenStage.Consumer do
           | {:read_end_offset, read_end_offset()}
           | {:gen_stage_producer_options, [GenStage.producer_option()]}
           | {:partition, integer()}
-          | {:stats_handler, (integer(), topic() -> :ok)}
+          | {:stats_handler, (stats(), topic() -> :ok)}
+          | {:stats_handler_interval, pos_integer()}
 
   @typedoc "List of startup options."
   @type options :: [option()]
@@ -112,7 +117,8 @@ defmodule KafkaGenStage.Consumer do
       :demand,
       :stats,
       :end_offset,
-      :stats_handler
+      :stats_handler,
+      :stats_handler_interval
     ]
   end
 
@@ -129,7 +135,8 @@ defmodule KafkaGenStage.Consumer do
           demand: non_neg_integer(),
           stats: stats(),
           end_offset: end_offset(),
-          stats_handler: stats_handler()
+          stats_handler: stats_handler(),
+          stats_handler_interval: pos_integer()
         }
 
   @doc """
@@ -145,6 +152,8 @@ defmodule KafkaGenStage.Consumer do
   @doc """
   Return some running metadata such as current offset position in topic.
   """
+  @spec get_insight(server :: term()) ::
+          {:ok, %{offset_cursor: non_neg_integer(), topic: topic()}}
   def get_insight(reader) do
     GenStage.call(reader, :get_insight)
   end
@@ -157,13 +166,15 @@ defmodule KafkaGenStage.Consumer do
     gen_stage_producer_options = options[:gen_stage_producer_options] || [demand: :forward]
     read_end_offset = options[:read_end_offset] || :infinity
     stats_handler = options[:stats_handler] || (&Utils.log_stats/2)
+    stats_handler_interval = options[:stats_handler_interval] || @default_interval
+
 
     with {:ok, client} <- Utils.resolve_client(brod_client_init),
          :ok <- :brod_utils.assert_client(client),
          :ok <- :brod_utils.assert_topic(topic),
          :ok <- :brod.start_consumer(client, topic, begin_offset: begin_offset) do
       GenStage.async_info(self(), :subscribe_consumer)
-      Process.send_after(self(), :time_to_report_stats, 1000)
+      Process.send_after(self(), :time_to_report_stats, stats_handler_interval)
 
       state = %State{
         brod_client: client,
@@ -175,6 +186,7 @@ defmodule KafkaGenStage.Consumer do
         stats: %{count: 0, cursor: 0},
         reading: :cont,
         stats_handler: stats_handler,
+        stats_handler_interval: stats_handler_interval,
         end_offset: resolve_end_offset(read_end_offset, client, topic, partition)
       }
 
@@ -260,7 +272,7 @@ defmodule KafkaGenStage.Consumer do
         %State{stats: stats, topic: topic, stats_handler: stats_handler} = state
       ) do
     stats_handler.(stats, topic)
-    Process.send_after(self(), :time_to_report_stats, 1000)
+    Process.send_after(self(), :time_to_report_stats, state.stats_handler_interval)
     {:noreply, [], %State{state | stats: %{stats | count: 0}}}
   end
 
