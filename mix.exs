@@ -9,7 +9,11 @@ defmodule KafkaGenStage.MixProject do
       package: package(),
       description: "Klarna's Brod kafka client wrapped into GenStage.",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      source_url: "https://github.com/altworx/kafka_gen_stage",
+      docs: [
+        source_url: "https://github.com/altworx/kafka_gen_stage"
+      ]
     ]
   end
 
@@ -32,8 +36,9 @@ defmodule KafkaGenStage.MixProject do
 
   defp package do
     %{
-      licences: ["Apache 2"],
-      maintainers: ["Matej Bosak"]
+      licenses: ["Apache 2"],
+      maintainers: ["Matej Bosak"],
+      links: %{"GitHub" => "https://github.com/altworx/kafka_gen_stage"}
     }
   end
 end
