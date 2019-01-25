@@ -226,10 +226,9 @@ defmodule KafkaGenStage.Consumer do
       GenStage.async_info(self(), :reading_end)
     end
 
+    stats = update_stats(state.stats, to_send)
     {to_send, state} = final_transform(to_send, state)
-
-    {:noreply, to_send,
-     %State{state | queue: queue, demand: demand, stats: update_stats(state.stats, to_send)}}
+    {:noreply, to_send, %State{state | queue: queue, demand: demand, stats: stats}}
   end
 
   @impl true
@@ -268,10 +267,10 @@ defmodule KafkaGenStage.Consumer do
 
     {to_send, to_ack, demand, queue} = Logic.prepare_dispatch(queue, demand)
     :ok = ack(consumer_pid, to_ack)
+    stats = update_stats(state.stats, to_send)
     {to_send, state} = final_transform(to_send, state)
 
-    {:noreply, to_send,
-     %State{state | demand: demand, queue: queue, stats: update_stats(state.stats, to_send)}}
+    {:noreply, to_send, %State{state | demand: demand, queue: queue, stats: stats}}
   end
 
   def handle_info({:DOWN, ref, :process, _object, reason}, %State{brod_client_mref: ref} = state) do
