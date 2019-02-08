@@ -31,8 +31,10 @@ defmodule KafkaGenStage.Consumer do
   * `:stats_handler_interval` - if you dont want stats_hander to be called every second,
     provide desired interval (milliseconds)
 
-  * `:transformer` - optionally event bulks can be statefully transformed before sending downstream.
-    Function take bulk of msg_tuples and state, returning transformed bulk and new state.
+  * `:transformer` - optionally events can be statefully transformed before sending downstream.
+    Function take single msg_tuple and state, returning either single message, or list(possibly empty)
+    of messages and new state. So transformer has flat_map semantics, and if result is list, it is
+    flattened shallowly (not deeply).
     Errors should be solved internally, so function always return at least {[], state}.
 
   * `:transformer_state` - initial state for final transforming function above.
@@ -90,7 +92,7 @@ defmodule KafkaGenStage.Consumer do
   @type stats_handler :: (stats(), topic() -> :ok)
 
   @typedoc "Msg tuple stateful transforming function called just before emitting event."
-  @type transformer :: ([msg_tuple], state :: term -> {[term], state :: term})
+  @type transformer :: (msg_tuple, state :: term -> {[term] | term, state :: term})
 
   @typedoc "Brod's type for where to start reading in kafka topic."
   @type begin_offset :: KafkaGenStage.begin_offset()
@@ -182,7 +184,7 @@ defmodule KafkaGenStage.Consumer do
     read_end_offset = options[:read_end_offset] || :infinity
     stats_handler = options[:stats_handler] || (&Utils.log_stats/2)
     stats_handler_interval = options[:stats_handler_interval] || @default_interval
-    transformer = options[:transformer] || fn bulk, state -> {bulk, state} end
+    transformer = options[:transformer] || fn msg, state -> {msg, state} end
     transformer_state = options[:transformer_state] || nil
 
     with {:ok, client} <- Utils.resolve_client(brod_client_init),
@@ -217,18 +219,28 @@ defmodule KafkaGenStage.Consumer do
   @impl true
   def handle_demand(
         new_demand,
-        %State{queue: queue, demand: pending_demand, consumer: consumer_pid} = state
+        %State{
+          queue: queue,
+          demand: pending_demand,
+          consumer: consumer_pid,
+          transformer: transformer,
+          transformer_state: transformer_state
+        } = state
       ) do
-    {to_send, to_ack, demand, queue} = Logic.prepare_dispatch(queue, new_demand + pending_demand)
+    {to_send, to_ack, demand, queue, new_transformer_state} =
+      Logic.prepare_dispatch(queue, new_demand + pending_demand, transformer, transformer_state)
+
     ack(consumer_pid, to_ack)
+    end_reading_on_halt(state.reading)
 
-    if state.reading == :halt do
-      GenStage.async_info(self(), :reading_end)
-    end
-
-    stats = update_stats(state.stats, to_send)
-    {to_send, state} = final_transform(to_send, state)
-    {:noreply, to_send, %State{state | queue: queue, demand: demand, stats: stats}}
+    {:noreply, to_send,
+     %State{
+       state
+       | queue: queue,
+         demand: demand,
+         stats: update_stats(state.stats, to_send, to_ack),
+         transformer_state: new_transformer_state
+     }}
   end
 
   @impl true
@@ -255,22 +267,29 @@ defmodule KafkaGenStage.Consumer do
           topic: topic,
           queue: queue,
           demand: demand,
-          end_offset: end_offset
+          end_offset: end_offset,
+          transformer: transformer,
+          transformer_state: transformer_state
         } = state
       ) do
     {reading_flag, queue} =
       Logic.messages_into_queue(messages, queue, end_offset, &kafka_msg_record_to_tuple/1)
 
-    if reading_flag == :halt do
-      GenStage.async_info(self(), :reading_end)
-    end
+    end_reading_on_halt(reading_flag)
 
-    {to_send, to_ack, demand, queue} = Logic.prepare_dispatch(queue, demand)
+    {to_send, to_ack, demand, queue, new_transformer_state} =
+      Logic.prepare_dispatch(queue, demand, transformer, transformer_state)
+
     :ok = ack(consumer_pid, to_ack)
-    stats = update_stats(state.stats, to_send)
-    {to_send, state} = final_transform(to_send, state)
 
-    {:noreply, to_send, %State{state | demand: demand, queue: queue, stats: stats}}
+    {:noreply, to_send,
+     %State{
+       state
+       | demand: demand,
+         queue: queue,
+         stats: update_stats(state.stats, to_send, to_ack),
+         transformer_state: new_transformer_state
+     }}
   end
 
   def handle_info({:DOWN, ref, :process, _object, reason}, %State{brod_client_mref: ref} = state) do
@@ -309,14 +328,8 @@ defmodule KafkaGenStage.Consumer do
     :brod_consumer.stop(pid)
   end
 
-  @spec final_transform([msg_tuple], state()) :: [term]
-  defp final_transform(
-         to_send,
-         %State{transformer: transformer, transformer_state: transformer_state} = state
-       ) do
-    {transformed_to_send, new_transformer_state} = transformer.(to_send, transformer_state)
-    {transformed_to_send, %State{state | transformer_state: new_transformer_state}}
-  end
+  defp end_reading_on_halt(:halt), do: GenStage.async_info(self(), :reading_end)
+  defp end_reading_on_halt(_), do: :no_side_effect
 
   defp resolve_end_offset(read_end_offset, client, topic, partition) do
     case read_end_offset do
@@ -333,18 +346,17 @@ defmodule KafkaGenStage.Consumer do
     end
   end
 
-  defp update_stats(%{count: count, cursor: cursor} = stats, to_send) do
-    %{stats | count: count + length(to_send), cursor: update_cursor(to_send, cursor)}
+  defp update_stats(%{count: count, cursor: cursor} = stats, to_send, to_ack) do
+    %{stats | count: count + length(to_send), cursor: update_cursor(to_ack, cursor)}
   end
 
-  defp update_cursor(to_send, current) do
-    case to_send do
-      [] = _nothing_to_send ->
+  defp update_cursor(to_ack, current) do
+    case to_ack do
+      :no_ack = _nothing_to_send ->
         current
 
-      _something_to_send ->
-        {cursor, _, _, _} = List.last(to_send)
-        cursor
+      ack ->
+        ack
     end
   end
 
