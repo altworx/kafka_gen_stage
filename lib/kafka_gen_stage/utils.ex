@@ -29,6 +29,7 @@ defmodule KafkaGenStage.Utils do
   """
   @spec resolve_client(atom() | pid() | (() -> {:ok, atom() | pid()})) :: {:ok, atom() | pid()}
   def resolve_client(client) when is_atom(client) or is_pid(client), do: {:ok, client}
+
   def resolve_client(brod_init) when is_function(brod_init) do
     case brod_init.() do
       {:ok, client} = resolved when is_atom(client) or is_pid(client) -> resolved
@@ -40,10 +41,15 @@ defmodule KafkaGenStage.Utils do
   @doc """
   Default stats handler for periodic info-report about genstage status.
   """
-  def log_stats(%{count: count, cursor: cursor}, topic) do
+  def log_stats(%{count: count} = stats, topic) do
     if count > 0 do
-      Logger.info("topic = #{topic}, throughput = #{count}, offset_cursor = #{cursor}")
+      line =
+        stats
+        |> Map.put(:topic, topic)
+        |> Enum.map(fn {key, value} -> "#{key}=#{value}" end)
+        |> Enum.join(", ")
+
+      Logger.info(line)
     end
   end
-
 end
