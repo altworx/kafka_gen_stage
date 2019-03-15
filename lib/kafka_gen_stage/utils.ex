@@ -52,4 +52,23 @@ defmodule KafkaGenStage.Utils do
       Logger.info(line)
     end
   end
+
+  @doc """
+  As described in moduledoc of `KafkaGenStage.Producer`, for producer we want the subscripton
+  option *cancel* to default to `:transient`. This function adjusts to that.
+  """
+  def adjust_gen_stage_consumer_options(options) when is_list(options) do
+    case Keyword.get(options, :subscribe_to) do
+      nil -> options
+      subs -> Keyword.put(options, :subscribe_to, Enum.map(subs, &adjust_subscribe_to/1))
+    end
+  end
+
+  defp adjust_subscribe_to({name, subscription_options}) when is_list(subscription_options) do
+    {name, Keyword.put_new(subscription_options, :cancel, :transient)}
+  end
+
+  defp adjust_subscribe_to(name) do
+    {name, cancel: :transient}
+  end
 end
