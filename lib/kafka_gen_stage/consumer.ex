@@ -180,7 +180,7 @@ defmodule KafkaGenStage.Consumer do
     # default options
     partition = options[:partition] || @partition
     begin_offset = options[:begin_offset] || :earliest
-    gen_stage_producer_options = options[:gen_stage_producer_options] || [demand: :forward]
+    gen_stage_producer_options = options[:gen_stage_producer_options]
     read_end_offset = options[:read_end_offset] || :infinity
     stats_handler = options[:stats_handler] || (&Utils.log_stats/2)
     stats_handler_interval = options[:stats_handler_interval] || @default_interval
@@ -209,8 +209,10 @@ defmodule KafkaGenStage.Consumer do
         transformer: transformer,
         transformer_state: transformer_state
       }
-
-      {:producer, state, gen_stage_producer_options}
+      case gen_stage_producer_options do
+        nil -> {:producer, state}
+        _ -> {:producer, state, gen_stage_producer_options}
+      end
     else
       err -> {:stop, err}
     end
