@@ -29,21 +29,38 @@ defmodule KafkaGenStage.ConsumerLogic do
           buffered_msgs :: :queue.queue(),
           buffered_demand :: non_neg_integer(),
           transformer :: (msg_tuple(), term() -> {term(), term()}),
-          transformer_state :: term
+          transformer_state :: term,
+          bulk_transformer :: ([msg_tuple()] -> [msg_tuple()])
         ) ::
           dispatch()
-  def prepare_dispatch(queue, 0, _transformer, state), do: {[], :no_ack, 0, queue, state}
+  def prepare_dispatch(queue, 0, _transformer, state, _bulk_transformer) do
+    {[], :no_ack, 0, queue, state}
+  end
 
-  def prepare_dispatch(queue, demand, transformer, state) do
+  def prepare_dispatch(queue, demand, transformer, state, bulk_transformer) do
     case :queue.out(queue) do
       {{:value, msg}, queue} ->
         {to_send, new_state, to_ack} = transform(msg, transformer, state)
         new_demand = lower_demand(demand, to_send)
-        prepare_dispatch(queue, new_demand, Enum.reverse(to_send), to_ack, transformer, new_state)
+
+        {to_send, to_ack, _demand, queue, new_transformer_state} =
+          prepare_dispatch(queue, new_demand, Enum.reverse(to_send), to_ack, transformer, new_state)
+
+        new_to_send = transform_bulk(to_send, bulk_transformer)
+        final_demand = lower_demand(demand, new_to_send)
+        {new_to_send, to_ack, final_demand, queue, new_transformer_state}
 
       {:empty, queue} ->
         {[], :no_ack, demand, queue, state}
     end
+  end
+
+  defp transform_bulk(to_send, nil) do
+    to_send
+  end
+
+  defp transform_bulk(to_send, bulk_transformer) do
+    bulk_transformer.(to_send)
   end
 
   @spec prepare_dispatch(
