@@ -10,11 +10,12 @@ defmodule KafkaGenStage.ConsumerLogicTest do
   @msgs [@msg0, @msg1, @msg2]
 
   def simple_transformer(msg, state), do: {msg, state}
+  def bulk_transformer(bulk), do: bulk
 
   test "prepare_dispatch with no demand -> no msgs to dispatch" do
     buffer = :queue.from_list(@msgs)
 
-    assert Logic.prepare_dispatch(buffer, 0, &simple_transformer/2, nil) ==
+    assert Logic.prepare_dispatch(buffer, 0, &simple_transformer/2, nil, nil) ==
              {[], :no_ack, 0, buffer, nil}
   end
 
@@ -22,7 +23,7 @@ defmodule KafkaGenStage.ConsumerLogicTest do
     buffer = :queue.from_list(@msgs)
 
     {to_send, ack, remaining_demand, remaining_buffer, nil} =
-      Logic.prepare_dispatch(buffer, 2, &simple_transformer/2, nil)
+      Logic.prepare_dispatch(buffer, 2, &simple_transformer/2, nil, &bulk_transformer/1)
 
     assert to_send == [@msg0, @msg1]
     assert ack == 1
@@ -30,15 +31,43 @@ defmodule KafkaGenStage.ConsumerLogicTest do
     assert :queue.to_list(remaining_buffer) == [@msg2]
   end
 
+  test "prepare_dispatch - bulk_transformer appends a message" do
+    {to_send, ack, remaining_demand, remaining_buffer, nil} =
+      Logic.prepare_dispatch(
+        :queue.from_list(@msgs),
+        5,
+        &simple_transformer/2,
+        nil,
+        fn x -> x ++ [@msg2] end
+      )
+
+    assert to_send == [@msg0, @msg1, @msg2, @msg2]
+    assert ack == 2
+    assert remaining_demand == 1
+    assert :queue.to_list(remaining_buffer) == []
+  end
+
   test "prepare_dispatch with more demand than events -> return all events and remaining demand" do
     expected = {@msgs, 2, 2, :queue.new(), nil}
 
-    assert Logic.prepare_dispatch(:queue.from_list(@msgs), 5, &simple_transformer/2, nil) ==
+    assert Logic.prepare_dispatch(
+             :queue.from_list(@msgs),
+             5,
+             &simple_transformer/2,
+             nil,
+             &bulk_transformer/1
+           ) ==
              expected
   end
 
   test "prepare_dispatch empty buffer just keeps demand" do
-    assert Logic.prepare_dispatch(:queue.new(), 5, &simple_transformer/2, nil) ==
+    assert Logic.prepare_dispatch(
+             :queue.new(),
+             5,
+             &simple_transformer/2,
+             nil,
+             &bulk_transformer/1
+           ) ==
              {[], :no_ack, 5, :queue.new(), nil}
   end
 
@@ -48,7 +77,9 @@ defmodule KafkaGenStage.ConsumerLogicTest do
     end
 
     expected = {["kafval0", "kafval0", "kafval1", "kafval1", "kafval1"], 1, 3, :queue.new(), 4}
-    assert Logic.prepare_dispatch(:queue.from_list([@msg0, @msg1]), 8, transfomer, 2) == expected
+
+    assert Logic.prepare_dispatch(:queue.from_list([@msg0, @msg1]), 8, transfomer, 2, nil) ==
+             expected
   end
 
   test "messages_into_queue inserts all on infinity end offset" do
