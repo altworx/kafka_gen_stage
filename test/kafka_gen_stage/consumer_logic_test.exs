@@ -10,20 +10,32 @@ defmodule KafkaGenStage.ConsumerLogicTest do
   @msgs [@msg0, @msg1, @msg2]
 
   def simple_transformer(msg, state), do: {msg, state}
-  def bulk_transformer(bulk), do: bulk
+  def bulk_transformer(bulk, _high_wm), do: bulk
+
+  def add_end_of_stream(bulk, 1), do: bulk ++ [:end_of_stream]
+
+  def add_end_of_stream(bulk, high_wm) do
+    {offset, _, _, _} = Enum.at(bulk, -1)
+
+    if offset == high_wm - 1 do
+      bulk ++ [:end_of_stream]
+    else
+      bulk
+    end
+  end
 
   test "prepare_dispatch with no demand -> no msgs to dispatch" do
     buffer = :queue.from_list(@msgs)
 
-    assert Logic.prepare_dispatch(buffer, 0, &simple_transformer/2, nil, nil) ==
-             {[], :no_ack, 0, buffer, nil}
+    assert Logic.prepare_dispatch(buffer, 0, nil, 3) ==
+             {[], :no_ack, 0, buffer}
   end
 
   test "prepare_dispatch with demand and envents -> return demand of events" do
     buffer = :queue.from_list(@msgs)
 
-    {to_send, ack, remaining_demand, remaining_buffer, nil} =
-      Logic.prepare_dispatch(buffer, 2, &simple_transformer/2, nil, &bulk_transformer/1)
+    {to_send, ack, remaining_demand, remaining_buffer} =
+      Logic.prepare_dispatch(buffer, 2, &bulk_transformer/2, 3)
 
     assert to_send == [@msg0, @msg1]
     assert ack == 1
@@ -32,13 +44,12 @@ defmodule KafkaGenStage.ConsumerLogicTest do
   end
 
   test "prepare_dispatch - bulk_transformer appends a message" do
-    {to_send, ack, remaining_demand, remaining_buffer, nil} =
+    {to_send, ack, remaining_demand, remaining_buffer} =
       Logic.prepare_dispatch(
         :queue.from_list(@msgs),
         5,
-        &simple_transformer/2,
-        nil,
-        fn x -> x ++ [@msg2] end
+        fn x, _high_wm -> x ++ [@msg2] end,
+        3
       )
 
     assert to_send == [@msg0, @msg1, @msg2, @msg2]
@@ -48,38 +59,25 @@ defmodule KafkaGenStage.ConsumerLogicTest do
   end
 
   test "prepare_dispatch with more demand than events -> return all events and remaining demand" do
-    expected = {@msgs, 2, 2, :queue.new(), nil}
+    expected = {@msgs, 2, 2, :queue.new()}
 
     assert Logic.prepare_dispatch(
              :queue.from_list(@msgs),
              5,
-             &simple_transformer/2,
-             nil,
-             &bulk_transformer/1
+             &bulk_transformer/2,
+             3
            ) ==
              expected
   end
 
-  test "prepare_dispatch empty buffer just keeps demand" do
+  test "prepare_dispatch empty buffer , generate end_of_stream" do
     assert Logic.prepare_dispatch(
              :queue.new(),
              5,
-             &simple_transformer/2,
-             nil,
-             &bulk_transformer/1
+             &add_end_of_stream/2,
+             1
            ) ==
-             {[], :no_ack, 5, :queue.new(), nil}
-  end
-
-  test "prepare_dispatch, transformer multiplies event value with state" do
-    transfomer = fn {_, _, _, value}, number ->
-      {Enum.reduce(1..number, [], fn _x, acc -> [value | acc] end), number + 1}
-    end
-
-    expected = {["kafval0", "kafval0", "kafval1", "kafval1", "kafval1"], 1, 3, :queue.new(), 4}
-
-    assert Logic.prepare_dispatch(:queue.from_list([@msg0, @msg1]), 8, transfomer, 2, nil) ==
-             expected
+             {[:end_of_stream], :no_ack, 4, :queue.new()}
   end
 
   test "messages_into_queue inserts all on infinity end offset" do

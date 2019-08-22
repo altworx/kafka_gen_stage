@@ -17,8 +17,7 @@ defmodule KafkaGenStage.ConsumerLogic do
   @typedoc "Internal type for working with demand and event buffers."
   @type dispatch ::
           {msgs_to_send :: [msg_tuple()], ack_to_brod_consumer :: ack(),
-           buffered_demand :: non_neg_integer(), buffered_msgs :: :queue.queue(),
-           transformer_state :: term()}
+           buffered_demand :: non_neg_integer(), buffered_msgs :: :queue.queue()}
 
   @doc """
   Handles caching of both, demand and events, as recomended in *Buffering Demand* in gen_stage docs.
@@ -28,39 +27,52 @@ defmodule KafkaGenStage.ConsumerLogic do
   @spec prepare_dispatch(
           buffered_msgs :: :queue.queue(),
           buffered_demand :: non_neg_integer(),
-          transformer :: (msg_tuple(), term() -> {term(), term()}),
-          transformer_state :: term,
-          bulk_transformer :: ([msg_tuple()] -> [msg_tuple()])
+          bulk_transformer :: ([msg_tuple()] -> [msg_tuple()]),
+          high_wm :: non_neg_integer()
         ) ::
           dispatch()
-  def prepare_dispatch(queue, 0, _transformer, state, _bulk_transformer) do
-    {[], :no_ack, 0, queue, state}
+  def prepare_dispatch(queue, 0, _bulk_transformer, _high_wm) do
+    {[], :no_ack, 0, queue}
   end
 
-  def prepare_dispatch(queue, demand, transformer, state, bulk_transformer) do
-    case :queue.out(queue) do
-      {{:value, msg}, queue} ->
-        {to_send, new_state, to_ack} = transform(msg, transformer, state)
-        new_demand = lower_demand(demand, to_send)
+  def prepare_dispatch(queue, demand, bulk_transformer, high_wm) do
+    {messages, ack_offset, queue} =
+      case :queue.out(queue) do
+        {{:value, {offset, _, _, _} = msg}, queue} ->
+          {to_send, to_ack, _demand, queue} =
+            prepare_dispatch(
+              queue,
+              demand - 1,
+              [msg],
+              offset,
+              high_wm
+            )
 
-        {to_send, to_ack, _demand, queue, new_transformer_state} =
-          prepare_dispatch(queue, new_demand, Enum.reverse(to_send), to_ack, transformer, new_state)
+          new_to_send =
+            to_send
+            |> Enum.reverse()
+            |> transform_bulk(bulk_transformer, high_wm)
 
-        new_to_send = transform_bulk(to_send, bulk_transformer)
-        final_demand = lower_demand(demand, new_to_send)
-        {new_to_send, to_ack, final_demand, queue, new_transformer_state}
+          {new_to_send, to_ack, queue}
 
-      {:empty, queue} ->
-        {[], :no_ack, demand, queue, state}
-    end
+        {:empty, queue} ->
+          {transform_bulk([], bulk_transformer, high_wm), :no_ack, queue}
+      end
+
+    final_demand = lower_demand(demand, messages)
+    {messages, ack_offset, final_demand, queue}
   end
 
-  defp transform_bulk(to_send, nil) do
+  defp transform_bulk(to_send, _, :unknown) do
     to_send
   end
 
-  defp transform_bulk(to_send, bulk_transformer) do
-    bulk_transformer.(to_send)
+  defp transform_bulk(to_send, nil, _high_wm) do
+    to_send
+  end
+
+  defp transform_bulk(to_send, bulk_transformer, high_wm) do
+    bulk_transformer.(to_send, high_wm)
   end
 
   @spec prepare_dispatch(
@@ -68,31 +80,25 @@ defmodule KafkaGenStage.ConsumerLogic do
           buffered_demand :: non_neg_integer(),
           msgs_to_send :: [term()],
           to_ack :: ack(),
-          transformer :: (msg_tuple(), term() -> {term(), term()}),
-          transformer_state :: term
+          high_wm :: non_neg_integer()
         ) :: dispatch()
-  defp prepare_dispatch(queue, 0, to_send, to_ack, _transformer, state) do
-    {Enum.reverse(to_send), to_ack, 0, queue, state}
+  defp prepare_dispatch(queue, 0, to_send, to_ack, _high_wm) do
+    {to_send, to_ack, 0, queue}
   end
 
-  defp prepare_dispatch(queue, demand, to_send, to_ack, transformer, state) do
+  defp prepare_dispatch(queue, demand, to_send, to_ack, high_wm) do
     case :queue.out(queue) do
-      {{:value, msg}, queue} ->
-        {more_to_send, new_state, next_to_ack} = transform(msg, transformer, state)
-        new_demand = lower_demand(demand, more_to_send)
-        new_to_send = Enum.reduce(more_to_send, to_send, fn msg, acc -> [msg | acc] end)
-        prepare_dispatch(queue, new_demand, new_to_send, next_to_ack, transformer, new_state)
+      {{:value, {offset, _, _, _} = msg}, queue} ->
+        prepare_dispatch(
+          queue,
+          demand - 1,
+          [msg | to_send],
+          offset,
+          high_wm
+        )
 
       {:empty, queue} ->
-        {Enum.reverse(to_send), to_ack, demand, queue, state}
-    end
-  end
-
-  @spec transform(msg_tuple(), fun(), term()) :: {[term()], term(), ack()}
-  def transform({offset, _, _, _} = msg, transformer, state) do
-    case transformer.(msg, state) do
-      {result, new_state} when is_list(result) -> {result, new_state, offset}
-      {non_list_result, new_state} -> {[non_list_result], new_state, offset}
+        {to_send, to_ack, demand, queue}
     end
   end
 
