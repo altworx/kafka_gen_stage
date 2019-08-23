@@ -4,7 +4,7 @@ defmodule KafkaGenStage.MixProject do
   def project do
     [
       app: :kafka_gen_stage,
-      version: "1.0.2",
+      version: "2.0.0",
       elixir: "~> 1.7",
       package: package(),
       description: "Klarna's Brod kafka client wrapped into GenStage.",
