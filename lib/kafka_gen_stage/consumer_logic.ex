@@ -17,6 +17,11 @@ defmodule KafkaGenStage.ConsumerLogic do
   @typedoc "Internal type for working with demand and event buffers."
   @type dispatch ::
           {msgs_to_send :: [msg_tuple()], ack_to_brod_consumer :: ack(),
+           buffered_msgs :: :queue.queue()}
+
+  @typedoc "API type for working with demand and event buffers."
+  @type return_dispatch ::
+          {msgs_to_send :: [msg_tuple()], ack_to_brod_consumer :: ack(),
            buffered_demand :: non_neg_integer(), buffered_msgs :: :queue.queue()}
 
   @doc """
@@ -30,37 +35,16 @@ defmodule KafkaGenStage.ConsumerLogic do
           bulk_transformer :: ([msg_tuple()] -> [msg_tuple()]),
           high_wm :: non_neg_integer()
         ) ::
-          dispatch()
+          return_dispatch()
   def prepare_dispatch(queue, 0, _bulk_transformer, _high_wm) do
     {[], :no_ack, 0, queue}
   end
 
   def prepare_dispatch(queue, demand, bulk_transformer, high_wm) do
-    {messages, ack_offset, queue} =
-      case :queue.out(queue) do
-        {{:value, {offset, _, _, _} = msg}, queue} ->
-          {to_send, to_ack, _demand, queue} =
-            prepare_dispatch(
-              queue,
-              demand - 1,
-              [msg],
-              offset,
-              high_wm
-            )
-
-          new_to_send =
-            to_send
-            |> Enum.reverse()
-            |> transform_bulk(bulk_transformer, high_wm)
-
-          {new_to_send, to_ack, queue}
-
-        {:empty, queue} ->
-          {transform_bulk([], bulk_transformer, high_wm), :no_ack, queue}
-      end
-
-    final_demand = lower_demand(demand, messages)
-    {messages, ack_offset, final_demand, queue}
+    {to_send, to_ack, queue} = prepare_dispatch(queue, demand, [], :no_ack, high_wm)
+    to_send = to_send |> Enum.reverse() |> transform_bulk(bulk_transformer, high_wm)
+    demand = lower_demand(demand, to_send)
+    {to_send, to_ack, demand, queue}
   end
 
   defp transform_bulk(to_send, _, :unknown) do
@@ -83,7 +67,7 @@ defmodule KafkaGenStage.ConsumerLogic do
           high_wm :: non_neg_integer()
         ) :: dispatch()
   defp prepare_dispatch(queue, 0, to_send, to_ack, _high_wm) do
-    {to_send, to_ack, 0, queue}
+    {to_send, to_ack, queue}
   end
 
   defp prepare_dispatch(queue, demand, to_send, to_ack, high_wm) do
@@ -98,7 +82,7 @@ defmodule KafkaGenStage.ConsumerLogic do
         )
 
       {:empty, queue} ->
-        {to_send, to_ack, demand, queue}
+        {to_send, to_ack, queue}
     end
   end
 
