@@ -33,7 +33,7 @@ defmodule KafkaGenStage.Consumer do
 
   * `:bulk_transformer` - optionally bulk of events can be statelessly transformed before sending downstream.
     Function signature must be:
-    ([msg_tuple], high_watermark_offset) :: [msg_tuple]
+    ([msg_tuple], is_end_of_stream) :: [msg_tuple]
 
   * `:gen_stage_producer_options` - refer to options passed to underlaying GenStage, usefull for
     accumulating demand when partition dispatcher is used (`[demand: :accumulate]`).
@@ -88,7 +88,7 @@ defmodule KafkaGenStage.Consumer do
   @type stats_handler :: (stats(), topic() -> :ok)
 
   @typedoc "Function transforming message bulks before sending them downstream."
-  @type bulk_transformer :: ([msg_tuple] -> [msg_tuple])
+  @type bulk_transformer :: ([msg_tuple], boolean() -> [msg_tuple])
 
   @typedoc "Brod's type for where to start reading in kafka topic."
   @type begin_offset :: KafkaGenStage.begin_offset()
@@ -121,7 +121,7 @@ defmodule KafkaGenStage.Consumer do
       :consumer,
       :consumer_ref,
       :queue,
-      :high_wm_offset,
+      :is_end_of_stream,
       :reading,
       :demand,
       :stats,
@@ -141,7 +141,7 @@ defmodule KafkaGenStage.Consumer do
           consumer: pid(),
           consumer_ref: reference(),
           queue: :queue.queue(),
-          high_wm_offset: non_neg_integer() | atom(),
+          is_end_of_stream: boolean(),
           reading: :halt | :cont,
           demand: non_neg_integer(),
           stats: stats(),
@@ -170,6 +170,18 @@ defmodule KafkaGenStage.Consumer do
     GenStage.call(reader, :get_insight)
   end
 
+  defp is_end_of_stream(1, :earliest) do
+    true
+  end
+
+  defp is_end_of_stream(_, :earliest) do
+    false
+  end
+
+  defp is_end_of_stream(latest, begin) when is_integer(begin) do
+    latest <= begin
+  end
+
   @impl true
   def init({brod_client_init, topic, options}) do
     # default options
@@ -185,8 +197,19 @@ defmodule KafkaGenStage.Consumer do
          :ok <- :brod_utils.assert_client(client),
          :ok <- :brod_utils.assert_topic(topic),
          :ok <- :brod.start_consumer(client, topic, begin_offset: begin_offset) do
+      {:ok, %{brokers: brokers}} = :brod_client.get_metadata(client, topic)
+
+      {:ok, latest_offset} =
+        :brod.resolve_offset(
+          Enum.map(brokers, fn %{host: h, port: p} -> {h, p} end),
+          [topic],
+          partition
+        )
+
       GenStage.async_info(self(), :subscribe_consumer)
       Process.send_after(self(), :time_to_report_stats, stats_handler_interval)
+
+      is_end_of_stream = is_end_of_stream(latest_offset, begin_offset)
 
       state = %State{
         brod_client: client,
@@ -194,7 +217,7 @@ defmodule KafkaGenStage.Consumer do
         partition: partition,
         brod_client_mref: Process.monitor(client),
         queue: :queue.new(),
-        high_wm_offset: :unknown,
+        is_end_of_stream: is_end_of_stream,
         demand: 0,
         stats: %{count: 0, cursor: 0},
         reading: :cont,
@@ -221,7 +244,7 @@ defmodule KafkaGenStage.Consumer do
           demand: pending_demand,
           consumer: consumer_pid,
           bulk_transformer: bulk_transformer,
-          high_wm_offset: high_wm_offset
+          is_end_of_stream: is_end_of_stream
         } = state
       ) do
     {to_send, to_ack, demand, queue} =
@@ -229,7 +252,7 @@ defmodule KafkaGenStage.Consumer do
         queue,
         new_demand + pending_demand,
         bulk_transformer,
-        high_wm_offset
+        is_end_of_stream
       )
 
     ack(consumer_pid, to_ack)
@@ -273,6 +296,9 @@ defmodule KafkaGenStage.Consumer do
           bulk_transformer: bulk_transformer
         } = state
       ) do
+    {last_offset, _, _, _} = kafka_msg_record_to_tuple(Enum.at(messages, -1))
+    is_end_of_stream = last_offset >= high_offset - 1
+
     {reading_flag, queue} =
       Logic.messages_into_queue(messages, queue, end_offset, &kafka_msg_record_to_tuple/1)
 
@@ -283,7 +309,7 @@ defmodule KafkaGenStage.Consumer do
         queue,
         demand,
         bulk_transformer,
-        high_offset
+        is_end_of_stream
       )
 
     :ok = ack(consumer_pid, to_ack)
@@ -294,7 +320,7 @@ defmodule KafkaGenStage.Consumer do
        | demand: demand,
          queue: queue,
          stats: update_stats(state.stats, to_send, to_ack),
-         high_wm_offset: high_offset
+         is_end_of_stream: is_end_of_stream
      }}
   end
 

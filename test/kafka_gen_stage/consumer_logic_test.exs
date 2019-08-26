@@ -12,12 +12,8 @@ defmodule KafkaGenStage.ConsumerLogicTest do
   def simple_transformer(msg, state), do: {msg, state}
   def bulk_transformer(bulk, _high_wm), do: bulk
 
-  def add_end_of_stream(bulk, 1), do: bulk ++ [:end_of_stream]
-
-  def add_end_of_stream(bulk, high_wm) do
-    {offset, _, _, _} = Enum.at(bulk, -1)
-
-    if offset == high_wm - 1 do
+  def add_end_of_stream(bulk, is_end_of_stream) do
+    if is_end_of_stream do
       bulk ++ [:end_of_stream]
     else
       bulk
@@ -27,7 +23,7 @@ defmodule KafkaGenStage.ConsumerLogicTest do
   test "prepare_dispatch with no demand -> no msgs to dispatch" do
     buffer = :queue.from_list(@msgs)
 
-    assert Logic.prepare_dispatch(buffer, 0, nil, 3) ==
+    assert Logic.prepare_dispatch(buffer, 0, nil, false) ==
              {[], :no_ack, 0, buffer}
   end
 
@@ -35,7 +31,7 @@ defmodule KafkaGenStage.ConsumerLogicTest do
     buffer = :queue.from_list(@msgs)
 
     {to_send, ack, remaining_demand, remaining_buffer} =
-      Logic.prepare_dispatch(buffer, 2, &bulk_transformer/2, 3)
+      Logic.prepare_dispatch(buffer, 2, &bulk_transformer/2, false)
 
     assert to_send == [@msg0, @msg1]
     assert ack == 1
@@ -49,7 +45,7 @@ defmodule KafkaGenStage.ConsumerLogicTest do
         :queue.from_list(@msgs),
         5,
         fn x, _high_wm -> x ++ [@msg2] end,
-        3
+        false
       )
 
     assert to_send == [@msg0, @msg1, @msg2, @msg2]
@@ -65,7 +61,7 @@ defmodule KafkaGenStage.ConsumerLogicTest do
              :queue.from_list(@msgs),
              5,
              &bulk_transformer/2,
-             3
+             false
            ) ==
              expected
   end
@@ -75,7 +71,7 @@ defmodule KafkaGenStage.ConsumerLogicTest do
              :queue.new(),
              5,
              &add_end_of_stream/2,
-             1
+             true
            ) ==
              {[:end_of_stream], :no_ack, 4, :queue.new()}
   end
