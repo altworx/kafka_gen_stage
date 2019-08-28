@@ -69,35 +69,15 @@ defmodule KafkaGenStage.ConsumerLogic do
     end
   end
 
-  @doc """
-  Insert incoming messages into buffer, up to end_offset(inclusive)
-  """
-  @spec messages_into_queue(
-          messages :: [any()],
-          buffered_message :: :queue.queue(msg_tuple()),
-          inclusive_end_offset :: end_offset(),
-          (msg :: term() -> msg_tuple())
-        ) :: {:cont | :halt, :queue.queue(msg_tuple())}
-  def messages_into_queue(messages, queue, end_offset, msg_to_tuple \\ & &1) do
-    Enum.reduce(messages, {:cont, queue}, fn msg, {flag, queue} ->
-      message_into_queue_reducer(msg_to_tuple.(msg), flag, end_offset, queue)
-    end)
-  end
-
-  @spec message_into_queue_reducer(
-          msg_tuple(),
-          :cont | :halt,
-          :infinity | integer(),
-          :queue.queue(msg_tuple())
-        ) :: {:cont | :halt, :queue.queue(msg_tuple())}
-  defp message_into_queue_reducer(msg, flag, :infinity, queue), do: {flag, :queue.in(msg, queue)}
-  defp message_into_queue_reducer(_, :halt, _, queue), do: {:halt, queue}
-
-  defp message_into_queue_reducer({offset, _, _, _} = msg, :cont = flag, end_offset, queue) do
-    cond do
-      offset < end_offset -> {flag, :queue.in(msg, queue)}
-      offset == end_offset -> {:halt, :queue.in(msg, queue)}
-      offset > end_offset -> {:halt, queue}
-    end
+  @doc "Enqueue incoming messages up to end_offset(inclusive)"
+  @spec enqueue(
+          queue :: :queue.queue(msg_tuple()),
+          messages :: Enum.t(),
+          inclusive_end_offset :: end_offset()
+        ) :: :queue.queue(msg_tuple())
+  def enqueue(queue, messages, end_offset) do
+    messages
+    |> Stream.take_while(fn {offset, _, _, _} -> offset <= end_offset end)
+    |> Enum.reduce(queue, &:queue.in/2)
   end
 end

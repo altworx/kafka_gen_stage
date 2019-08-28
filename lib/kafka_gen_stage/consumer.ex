@@ -142,7 +142,7 @@ defmodule KafkaGenStage.Consumer do
           consumer_ref: reference(),
           queue: :queue.queue(),
           is_end_of_stream: boolean(),
-          reading: :halt | :cont,
+          reading: boolean(),
           demand: non_neg_integer(),
           stats: stats(),
           end_offset: end_offset(),
@@ -198,7 +198,7 @@ defmodule KafkaGenStage.Consumer do
         is_end_of_stream: begin_is_end_of_stream(latest_offset, begin_offset),
         demand: 0,
         stats: %{count: 0, cursor: 0},
-        reading: :cont,
+        reading: true,
         stats_handler: stats_handler,
         stats_handler_interval: stats_handler_interval,
         end_offset: resolve_end_offset(latest_offset, read_end_offset),
@@ -234,7 +234,9 @@ defmodule KafkaGenStage.Consumer do
       )
 
     ack(consumer_pid, to_ack)
-    end_reading_on_halt(state.reading)
+
+    unless state.reading,
+      do: GenStage.async_info(self(), :reading_end)
 
     {:noreply, to_send,
      %State{
@@ -277,10 +279,7 @@ defmodule KafkaGenStage.Consumer do
     {last_offset, _, _, _} = kafka_msg_record_to_tuple(Enum.at(messages, -1))
     is_end_of_stream = last_offset >= high_offset - 1
 
-    {reading_flag, queue} =
-      Logic.messages_into_queue(messages, queue, end_offset, &kafka_msg_record_to_tuple/1)
-
-    end_reading_on_halt(reading_flag)
+    queue = Logic.enqueue(queue, messages |> Stream.map(&kafka_msg_record_to_tuple/1), end_offset)
 
     {to_send, to_ack, demand, queue} =
       Logic.prepare_dispatch(
@@ -291,6 +290,9 @@ defmodule KafkaGenStage.Consumer do
       )
 
     :ok = ack(consumer_pid, to_ack)
+
+    if last_offset >= end_offset,
+      do: GenStage.async_info(self(), :reading_end)
 
     {:noreply, to_send,
      %State{
@@ -329,7 +331,7 @@ defmodule KafkaGenStage.Consumer do
     if :queue.is_empty(state.queue) do
       {:stop, :normal, state}
     else
-      {:noreply, [], %State{state | reading: :halt}}
+      {:noreply, [], %State{state | reading: false}}
     end
   end
 
@@ -337,9 +339,6 @@ defmodule KafkaGenStage.Consumer do
   def terminate(_reason, %State{consumer: pid}) do
     :brod_consumer.stop(pid)
   end
-
-  defp end_reading_on_halt(:halt), do: GenStage.async_info(self(), :reading_end)
-  defp end_reading_on_halt(_), do: :no_side_effect
 
   defp begin_is_end_of_stream(_latest, :latest), do: true
   defp begin_is_end_of_stream(latest, :earliest), do: latest == 1
