@@ -17,6 +17,11 @@ defmodule KafkaGenStage.ConsumerLogic do
   @typedoc "Internal type for working with demand and event buffers."
   @type dispatch ::
           {msgs_to_send :: [msg_tuple()], ack_to_brod_consumer :: ack(),
+           buffered_msgs :: :queue.queue()}
+
+  @typedoc "API type for working with demand and event buffers."
+  @type return_dispatch ::
+          {msgs_to_send :: [msg_tuple()], ack_to_brod_consumer :: ack(),
            buffered_demand :: non_neg_integer(), buffered_msgs :: :queue.queue()}
 
   @doc """
@@ -28,77 +33,50 @@ defmodule KafkaGenStage.ConsumerLogic do
           buffered_msgs :: :queue.queue(),
           buffered_demand :: non_neg_integer(),
           bulk_transformer :: ([msg_tuple()] -> [msg_tuple()]),
-          high_wm :: non_neg_integer()
+          is_end_of_stream :: boolean()
         ) ::
-          dispatch()
-  def prepare_dispatch(queue, 0, _bulk_transformer, _high_wm) do
+          return_dispatch()
+  def prepare_dispatch(queue, 0, _bulk_transformer, _is_end_of_stream) do
     {[], :no_ack, 0, queue}
   end
 
-  def prepare_dispatch(queue, demand, bulk_transformer, high_wm) do
-    {messages, ack_offset, queue} =
-      case :queue.out(queue) do
-        {{:value, {offset, _, _, _} = msg}, queue} ->
-          {to_send, to_ack, _demand, queue} =
-            prepare_dispatch(
-              queue,
-              demand - 1,
-              [msg],
-              offset,
-              high_wm
-            )
-
-          new_to_send =
-            to_send
-            |> Enum.reverse()
-            |> transform_bulk(bulk_transformer, high_wm)
-
-          {new_to_send, to_ack, queue}
-
-        {:empty, queue} ->
-          {transform_bulk([], bulk_transformer, high_wm), :no_ack, queue}
-      end
-
-    final_demand = lower_demand(demand, messages)
-    {messages, ack_offset, final_demand, queue}
+  def prepare_dispatch(queue, demand, bulk_transformer, is_end_of_stream) do
+    {to_send, to_ack, queue} = dequeue(queue, demand, [], :no_ack)
+    to_send = to_send |> Enum.reverse() |> transform_bulk(bulk_transformer, is_end_of_stream)
+    demand = lower_demand(demand, to_send)
+    {to_send, to_ack, demand, queue}
   end
 
-  defp transform_bulk(to_send, _, :unknown) do
+  defp transform_bulk(to_send, nil, _is_end_of_stream) do
     to_send
   end
 
-  defp transform_bulk(to_send, nil, _high_wm) do
-    to_send
+  defp transform_bulk(to_send, bulk_transformer, is_end_of_stream) do
+    bulk_transformer.(to_send, is_end_of_stream)
   end
 
-  defp transform_bulk(to_send, bulk_transformer, high_wm) do
-    bulk_transformer.(to_send, high_wm)
-  end
-
-  @spec prepare_dispatch(
+  @spec dequeue(
           buffered_msgs :: :queue.queue(),
           buffered_demand :: non_neg_integer(),
           msgs_to_send :: [term()],
-          to_ack :: ack(),
-          high_wm :: non_neg_integer()
+          to_ack :: ack()
         ) :: dispatch()
-  defp prepare_dispatch(queue, 0, to_send, to_ack, _high_wm) do
-    {to_send, to_ack, 0, queue}
+  defp dequeue(queue, 0, to_send, to_ack) do
+    {to_send, to_ack, queue}
   end
 
-  defp prepare_dispatch(queue, demand, to_send, to_ack, high_wm) do
+  defp dequeue(queue, demand, to_send, to_ack) do
     case :queue.out(queue) do
       {{:value, {offset, _, _, _} = msg}, queue} ->
-        prepare_dispatch(
+        dequeue(
           queue,
           demand - 1,
           [msg | to_send],
-          offset,
-          high_wm
+          offset
         )
 
       {:empty, queue} ->
-        {to_send, to_ack, demand, queue}
+        {to_send, to_ack, queue}
     end
   end
 
