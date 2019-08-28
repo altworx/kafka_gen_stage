@@ -23,3 +23,5 @@ erl_crash.dump
 kafka_gen_stage-*.tar
 
 .dir-locals.el
+
+/.elixir_ls/
