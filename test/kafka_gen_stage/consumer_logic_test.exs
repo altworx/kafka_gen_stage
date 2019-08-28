@@ -9,10 +9,9 @@ defmodule KafkaGenStage.ConsumerLogicTest do
   @msg2 {2, 1_540_458_185_659, "kafkey2", "kafval2"}
   @msgs [@msg0, @msg1, @msg2]
 
-  def simple_transformer(msg, state), do: {msg, state}
-  def bulk_transformer(bulk, _high_wm), do: bulk
+  defp bulk_transformer(bulk, _is_end_of_stream), do: bulk
 
-  def add_end_of_stream(bulk, is_end_of_stream) do
+  defp add_end_of_stream(bulk, is_end_of_stream) do
     if is_end_of_stream do
       bulk ++ [:end_of_stream]
     else
@@ -44,7 +43,7 @@ defmodule KafkaGenStage.ConsumerLogicTest do
       Logic.prepare_dispatch(
         :queue.from_list(@msgs),
         5,
-        fn x, _high_wm -> x ++ [@msg2] end,
+        fn x, _is_end_of_stream -> x ++ [@msg2] end,
         false
       )
 
