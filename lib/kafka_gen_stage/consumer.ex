@@ -276,8 +276,8 @@ defmodule KafkaGenStage.Consumer do
           bulk_transformer: bulk_transformer
         } = state
       ) do
-    {last_offset, _, _, _} = kafka_msg_record_to_tuple(Enum.at(messages, -1))
-    is_end_of_stream = last_offset >= high_offset - 1
+    kafka_message(offset: last_offset) = List.last(messages)
+    is_end_of_stream = last_offset >= min(high_offset - 1, end_offset)
 
     queue = Logic.enqueue(queue, messages |> Stream.map(&kafka_msg_record_to_tuple/1), end_offset)
 
