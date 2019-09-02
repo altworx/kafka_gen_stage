@@ -142,7 +142,7 @@ defmodule KafkaGenStage.Consumer do
           consumer_ref: reference(),
           queue: :queue.queue(),
           is_end_of_stream: boolean(),
-          reading: :halt | :cont,
+          reading: boolean(),
           demand: non_neg_integer(),
           stats: stats(),
           end_offset: end_offset(),
@@ -170,18 +170,6 @@ defmodule KafkaGenStage.Consumer do
     GenStage.call(reader, :get_insight)
   end
 
-  defp is_end_of_stream(1, :earliest) do
-    true
-  end
-
-  defp is_end_of_stream(_, :earliest) do
-    false
-  end
-
-  defp is_end_of_stream(latest, begin) when is_integer(begin) do
-    latest <= begin
-  end
-
   @impl true
   def init({brod_client_init, topic, options}) do
     # default options
@@ -196,20 +184,10 @@ defmodule KafkaGenStage.Consumer do
     with {:ok, client} <- Utils.resolve_client(brod_client_init),
          :ok <- :brod_utils.assert_client(client),
          :ok <- :brod_utils.assert_topic(topic),
+         {:ok, latest_offset} = Utils.resolve_offset(client, topic, partition, :latest),
          :ok <- :brod.start_consumer(client, topic, begin_offset: begin_offset) do
-      {:ok, %{brokers: brokers}} = :brod_client.get_metadata(client, topic)
-
-      {:ok, latest_offset} =
-        :brod.resolve_offset(
-          Enum.map(brokers, fn %{host: h, port: p} -> {h, p} end),
-          [topic],
-          partition
-        )
-
       GenStage.async_info(self(), :subscribe_consumer)
       Process.send_after(self(), :time_to_report_stats, stats_handler_interval)
-
-      is_end_of_stream = is_end_of_stream(latest_offset, begin_offset)
 
       state = %State{
         brod_client: client,
@@ -217,13 +195,13 @@ defmodule KafkaGenStage.Consumer do
         partition: partition,
         brod_client_mref: Process.monitor(client),
         queue: :queue.new(),
-        is_end_of_stream: is_end_of_stream,
+        is_end_of_stream: begin_is_end_of_stream(latest_offset, begin_offset),
         demand: 0,
         stats: %{count: 0, cursor: 0},
-        reading: :cont,
+        reading: true,
         stats_handler: stats_handler,
         stats_handler_interval: stats_handler_interval,
-        end_offset: resolve_end_offset(read_end_offset, client, topic, partition),
+        end_offset: resolve_end_offset(latest_offset, read_end_offset),
         bulk_transformer: bulk_transformer
       }
 
@@ -256,7 +234,9 @@ defmodule KafkaGenStage.Consumer do
       )
 
     ack(consumer_pid, to_ack)
-    end_reading_on_halt(state.reading)
+
+    unless state.reading,
+      do: GenStage.async_info(self(), :reading_end)
 
     {:noreply, to_send,
      %State{
@@ -296,13 +276,10 @@ defmodule KafkaGenStage.Consumer do
           bulk_transformer: bulk_transformer
         } = state
       ) do
-    {last_offset, _, _, _} = kafka_msg_record_to_tuple(Enum.at(messages, -1))
-    is_end_of_stream = last_offset >= high_offset - 1
+    kafka_message(offset: last_offset) = List.last(messages)
+    is_end_of_stream = last_offset >= min(high_offset - 1, end_offset)
 
-    {reading_flag, queue} =
-      Logic.messages_into_queue(messages, queue, end_offset, &kafka_msg_record_to_tuple/1)
-
-    end_reading_on_halt(reading_flag)
+    queue = Logic.enqueue(queue, messages |> Stream.map(&kafka_msg_record_to_tuple/1), end_offset)
 
     {to_send, to_ack, demand, queue} =
       Logic.prepare_dispatch(
@@ -313,6 +290,9 @@ defmodule KafkaGenStage.Consumer do
       )
 
     :ok = ack(consumer_pid, to_ack)
+
+    if last_offset >= end_offset,
+      do: GenStage.async_info(self(), :reading_end)
 
     {:noreply, to_send,
      %State{
@@ -351,7 +331,7 @@ defmodule KafkaGenStage.Consumer do
     if :queue.is_empty(state.queue) do
       {:stop, :normal, state}
     else
-      {:noreply, [], %State{state | reading: :halt}}
+      {:noreply, [], %State{state | reading: false}}
     end
   end
 
@@ -360,23 +340,13 @@ defmodule KafkaGenStage.Consumer do
     :brod_consumer.stop(pid)
   end
 
-  defp end_reading_on_halt(:halt), do: GenStage.async_info(self(), :reading_end)
-  defp end_reading_on_halt(_), do: :no_side_effect
+  defp begin_is_end_of_stream(_latest, :latest), do: true
+  defp begin_is_end_of_stream(latest, :earliest), do: latest == 1
+  defp begin_is_end_of_stream(latest, begin) when is_integer(begin), do: latest <= begin
 
-  defp resolve_end_offset(read_end_offset, client, topic, partition) do
-    case read_end_offset do
-      offset when is_integer(offset) ->
-        offset
-
-      :infinity ->
-        :infinity
-
-      :latest ->
-        {:ok, offset} = Utils.resolve_offset(client, topic, partition, :latest)
-        # it next offset to be assigned, we have to use the one before
-        offset - 1
-    end
-  end
+  defp resolve_end_offset(latest, :latest), do: latest - 1
+  defp resolve_end_offset(_latest, :infinity), do: :infinity
+  defp resolve_end_offset(_latest, read_end) when is_integer(read_end), do: :infinity
 
   defp update_stats(%{count: count, cursor: cursor} = stats, to_send, to_ack) do
     %{stats | count: count + length(to_send), cursor: update_cursor(to_ack, cursor)}

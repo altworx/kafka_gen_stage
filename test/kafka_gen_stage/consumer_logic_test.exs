@@ -9,10 +9,9 @@ defmodule KafkaGenStage.ConsumerLogicTest do
   @msg2 {2, 1_540_458_185_659, "kafkey2", "kafval2"}
   @msgs [@msg0, @msg1, @msg2]
 
-  def simple_transformer(msg, state), do: {msg, state}
-  def bulk_transformer(bulk, _high_wm), do: bulk
+  defp bulk_transformer(bulk, _is_end_of_stream), do: bulk
 
-  def add_end_of_stream(bulk, is_end_of_stream) do
+  defp add_end_of_stream(bulk, is_end_of_stream) do
     if is_end_of_stream do
       bulk ++ [:end_of_stream]
     else
@@ -44,7 +43,7 @@ defmodule KafkaGenStage.ConsumerLogicTest do
       Logic.prepare_dispatch(
         :queue.from_list(@msgs),
         5,
-        fn x, _high_wm -> x ++ [@msg2] end,
+        fn x, _is_end_of_stream -> x ++ [@msg2] end,
         false
       )
 
@@ -76,20 +75,20 @@ defmodule KafkaGenStage.ConsumerLogicTest do
              {[:end_of_stream], :no_ack, 4, :queue.new()}
   end
 
-  test "messages_into_queue inserts all on infinity end offset" do
-    buffer = :queue.from_list([@msg0])
-    {:cont, new_buffer} = Logic.messages_into_queue([@msg1, @msg2], buffer, :infinity)
-    assert :queue.to_list(new_buffer) == @msgs
+  test "enqueue inserts all on infinity end offset" do
+    queue = :queue.from_list([@msg0])
+    queue = Logic.enqueue(queue, [@msg1, @msg2], :infinity)
+    assert :queue.to_list(queue) == @msgs
   end
 
-  test "messages_into_queue insert until end offset inclusive" do
-    {:halt, buffer} = Logic.messages_into_queue(@msgs, :queue.new(), 1)
-    assert :queue.to_list(buffer) == [@msg0, @msg1]
+  test "enqueue inserts until end offset inclusive" do
+    queue = Logic.enqueue(:queue.new(), @msgs, 1)
+    assert :queue.to_list(queue) == [@msg0, @msg1]
   end
 
-  test "message_into_queue dont insert after end offset" do
-    buffer = :queue.from_list([@msg0, @msg1])
-    {:halt, new_buffer} = Logic.messages_into_queue([@msg2], buffer, 1)
-    assert :queue.to_list(new_buffer) == [@msg0, @msg1]
+  test "enqueue doesn't insert after end offset" do
+    queue = :queue.from_list([@msg0, @msg1])
+    queue = Logic.enqueue(queue, [@msg2], 1)
+    assert :queue.to_list(queue) == [@msg0, @msg1]
   end
 end
