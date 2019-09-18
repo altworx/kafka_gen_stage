@@ -22,7 +22,7 @@ defmodule KafkaGenStage.ConsumerLogic do
   @spec prepare_dispatch(
           buffered_msgs :: :queue.queue(),
           buffered_demand :: non_neg_integer(),
-          bulk_transformer :: ([msg_tuple()] -> [msg_tuple()]),
+          bulk_transformer :: ([msg_tuple()], boolean() -> [msg_tuple()]),
           is_end_of_stream :: boolean()
         ) :: {
           msgs_to_send :: [msg_tuple()],
