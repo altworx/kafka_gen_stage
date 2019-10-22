@@ -122,6 +122,7 @@ defmodule KafkaGenStage.Consumer do
       :consumer_ref,
       :queue,
       :is_end_of_stream,
+      :end_of_stream_offset_queue,
       :reading,
       :demand,
       :stats,
@@ -142,6 +143,7 @@ defmodule KafkaGenStage.Consumer do
           consumer_ref: reference(),
           queue: :queue.queue(),
           is_end_of_stream: boolean(),
+          end_of_stream_offset_queue: :queue.queue(),
           reading: boolean(),
           demand: non_neg_integer(),
           stats: stats(),
@@ -185,6 +187,7 @@ defmodule KafkaGenStage.Consumer do
          :ok <- :brod_utils.assert_client(client),
          :ok <- :brod_utils.assert_topic(topic),
          {:ok, latest_offset} = Utils.resolve_offset(client, topic, partition, :latest),
+         {:ok, earliest_offset} = Utils.resolve_offset(client, topic, partition, :earliest),
          :ok <- :brod.start_consumer(client, topic, begin_offset: begin_offset) do
       GenStage.async_info(self(), :subscribe_consumer)
       Process.send_after(self(), :time_to_report_stats, stats_handler_interval)
@@ -195,7 +198,8 @@ defmodule KafkaGenStage.Consumer do
         partition: partition,
         brod_client_mref: Process.monitor(client),
         queue: :queue.new(),
-        is_end_of_stream: begin_is_end_of_stream(latest_offset, begin_offset),
+        is_end_of_stream: begin_is_end_of_stream(earliest_offset, latest_offset, begin_offset),
+        end_of_stream_offset_queue: :queue.new(),
         demand: 0,
         stats: %{count: 0, cursor: 0},
         reading: true,
@@ -222,15 +226,17 @@ defmodule KafkaGenStage.Consumer do
           demand: pending_demand,
           consumer: consumer_pid,
           bulk_transformer: bulk_transformer,
-          is_end_of_stream: is_end_of_stream
+          is_end_of_stream: is_end_of_stream,
+          end_of_stream_offset_queue: eos_queue
         } = state
       ) do
-    {to_send, to_ack, demand, queue} =
+    {to_send, to_ack, demand, queue, eos_queue} =
       Logic.prepare_dispatch(
         queue,
         new_demand + pending_demand,
         bulk_transformer,
-        is_end_of_stream
+        is_end_of_stream,
+        eos_queue
       )
 
     ack(consumer_pid, to_ack)
@@ -243,7 +249,8 @@ defmodule KafkaGenStage.Consumer do
        state
        | queue: queue,
          demand: demand,
-         stats: update_stats(state.stats, to_send, to_ack)
+         stats: update_stats(state.stats, to_send, to_ack),
+         end_of_stream_offset_queue: eos_queue
      }}
   end
 
@@ -273,20 +280,30 @@ defmodule KafkaGenStage.Consumer do
           queue: queue,
           demand: demand,
           end_offset: end_offset,
-          bulk_transformer: bulk_transformer
+          bulk_transformer: bulk_transformer,
+          end_of_stream_offset_queue: eos_queue
         } = state
       ) do
     kafka_message(offset: last_offset) = List.last(messages)
+
     is_end_of_stream = last_offset >= min(high_offset - 1, end_offset)
+
+    eos_queue =
+      if is_end_of_stream do
+        :queue.in(last_offset, eos_queue)
+      else
+        eos_queue
+      end
 
     queue = Logic.enqueue(queue, messages |> Stream.map(&kafka_msg_record_to_tuple/1), end_offset)
 
-    {to_send, to_ack, demand, queue} =
+    {to_send, to_ack, demand, queue, eos_queue} =
       Logic.prepare_dispatch(
         queue,
         demand,
         bulk_transformer,
-        is_end_of_stream
+        is_end_of_stream,
+        eos_queue
       )
 
     :ok = ack(consumer_pid, to_ack)
@@ -300,7 +317,8 @@ defmodule KafkaGenStage.Consumer do
        | demand: demand,
          queue: queue,
          stats: update_stats(state.stats, to_send, to_ack),
-         is_end_of_stream: is_end_of_stream
+         is_end_of_stream: is_end_of_stream,
+         end_of_stream_offset_queue: eos_queue
      }}
   end
 
@@ -340,9 +358,14 @@ defmodule KafkaGenStage.Consumer do
     :brod_consumer.stop(pid)
   end
 
-  defp begin_is_end_of_stream(_latest, :latest), do: true
-  defp begin_is_end_of_stream(latest, :earliest), do: latest == 1
-  defp begin_is_end_of_stream(latest, begin) when is_integer(begin), do: latest <= begin
+  # the topic is empty
+  defp begin_is_end_of_stream(0, 0, _), do: true
+  # reading from the last message, automatically is at the end of stream
+  defp begin_is_end_of_stream(_earliest, _latest, :latest), do: true
+  # reading from the first message, is at the end of stream only if the first message is also the last
+  defp begin_is_end_of_stream(earliest, latest, :earliest), do: latest == earliest
+  # reading from the middle
+  defp begin_is_end_of_stream(_earliest, latest, begin) when is_integer(begin), do: latest <= begin
 
   defp resolve_end_offset(latest, :latest), do: latest - 1
   defp resolve_end_offset(_latest, :infinity), do: :infinity
