@@ -25,7 +25,7 @@ defmodule KafkaGenStage.MixProject do
 
   defp deps do
     [
-      {:brod, "~> 3.7.0"},
+      {:brod, "~> 3.9.0"},
       {:gen_stage, "~> 0.14.0"},
       {:inch_ex, "~> 2.0", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.19", only: [:dev, :docs], runtime: false},
