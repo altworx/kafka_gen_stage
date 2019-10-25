@@ -23,29 +23,42 @@ defmodule KafkaGenStage.ConsumerLogic do
           buffered_msgs :: :queue.queue(),
           buffered_demand :: non_neg_integer(),
           bulk_transformer :: ([msg_tuple()], boolean() -> [msg_tuple()]),
-          is_end_of_stream :: boolean()
+          is_end_of_stream :: boolean(),
+          eos_queue :: :queue.queue()
         ) :: {
           msgs_to_send :: [msg_tuple()],
           ack_to_brod_consumer :: ack(),
           buffered_demand :: non_neg_integer(),
-          buffered_msgs :: :queue.queue()
+          buffered_msgs :: :queue.queue(),
+          eos_queue :: :queue.queue()
         }
-  def prepare_dispatch(queue, 0, _bulk_transformer, _is_end_of_stream) do
-    {[], :no_ack, 0, queue}
+  def prepare_dispatch(queue, 0, _bulk_transformer, _is_end_of_stream, eos_queue) do
+    {[], :no_ack, 0, queue, eos_queue}
   end
 
-  def prepare_dispatch(queue, demand, bulk_transformer, is_end_of_stream) do
+  def prepare_dispatch(queue, demand, bulk_transformer, is_end_of_stream, eos_queue) do
     {to_send, queue} = dequeue(queue, demand)
 
-    to_ack =
+    {to_ack, to_send, eos_queue} =
       case to_send do
-        [] -> :no_ack
-        [{offset, _, _, _} | _] -> offset
+        [] ->
+          {:no_ack, transform_bulk([], bulk_transformer, is_end_of_stream), eos_queue}
+
+        [{last_offset, _, _, _} | _] ->
+          is_last_bulk =
+            case :queue.peek(eos_queue) do
+              {:value, eos_offset} -> last_offset >= eos_offset
+              _ -> false
+            end
+
+          eos_queue = dequeue_eos_offsets(eos_queue, last_offset)
+
+          {last_offset,
+           to_send |> Enum.reverse() |> transform_bulk(bulk_transformer, is_last_bulk), eos_queue}
       end
 
-    to_send = to_send |> Enum.reverse() |> transform_bulk(bulk_transformer, is_end_of_stream)
     demand = max(0, demand - length(to_send))
-    {to_send, to_ack, demand, queue}
+    {to_send, to_ack, demand, queue, eos_queue}
   end
 
   defp transform_bulk(to_send, nil, _is_end_of_stream) do
@@ -79,5 +92,12 @@ defmodule KafkaGenStage.ConsumerLogic do
     messages
     |> Stream.take_while(fn {offset, _, _, _} -> offset <= end_offset end)
     |> Enum.reduce(queue, &:queue.in/2)
+  end
+
+  defp dequeue_eos_offsets(queue, until) do
+    case :queue.peek(queue) do
+      {:value, offset} when offset <= until -> dequeue_eos_offsets(:queue.tail(queue), until)
+      _ -> queue
+    end
   end
 end
